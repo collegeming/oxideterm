@@ -969,6 +969,8 @@
       "keys_and_connections_description": "Gestionar claves SSH, valores de conexión predeterminados, conexiones en segundo plano, reconexión e importaciones.",
       "default_username": "Usuario predeterminado",
       "default_port": "Puerto predeterminado",
+      "auto_scan_on_startup": "Buscar conexiones guardadas al iniciar",
+      "auto_scan_on_startup_hint": "Analizar la red local al iniciar y actualizar las conexiones guardadas cuya huella digital de clave de host SSH aparezca en una dirección nueva.",
       "groups": {
         "title": "Grupos",
         "description": "Gestiona grupos de conexiones.",

@@ -145,6 +145,17 @@ impl NodeRouter {
             .update_saved_connection_x11_forwarding(saved_connection_id, x11_forwarding)
     }
 
+    /// Repoints runtime nodes materialized from a saved connection at a new address.
+    pub fn retarget_saved_connection(
+        &self,
+        saved_connection_id: &str,
+        host: &str,
+        port: u16,
+    ) -> usize {
+        self.runtime
+            .retarget_saved_connection(saved_connection_id, host, port)
+    }
+
     pub fn update_node_origin(
         &self,
         node_id: &NodeId,

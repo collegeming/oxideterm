@@ -324,6 +324,17 @@ impl Default for SshConfigSettings {
     }
 }
 
+/// Rediscovery of saved connections whose host moved to another address.
+///
+/// A scan probes the local network, so it stays opt-in and off by default for
+/// existing installations and for settings files written before the key existed.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionScanSettings {
+    #[serde(default)]
+    pub auto_scan_on_startup: bool,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticsSettings {
@@ -481,6 +492,8 @@ pub struct PersistedSettings {
     #[serde(default)]
     pub ssh_config: SshConfigSettings,
     #[serde(default)]
+    pub connection_scan: ConnectionScanSettings,
+    #[serde(default)]
     pub diagnostics: DiagnosticsSettings,
     #[serde(default)]
     pub host_tools: HostToolsSettings,
@@ -518,6 +531,7 @@ impl Default for PersistedSettings {
             agent_roles: None,
             new_connection: NewConnectionSettings::default(),
             ssh_config: SshConfigSettings::default(),
+            connection_scan: ConnectionScanSettings::default(),
             diagnostics: DiagnosticsSettings::default(),
             host_tools: HostToolsSettings::default(),
             extra: ExtraFields::new(),
@@ -617,6 +631,24 @@ mod misc_tests {
         assert!(restored.ssh_config.auto_load_hosts);
         assert!(!restored.ssh_config.auto_sync_hosts);
         assert!(!restored.ssh_config.allow_proxy_command);
+    }
+
+    #[test]
+    fn connection_scan_is_opt_in_and_round_trips_with_camel_case_keys() {
+        let defaults = PersistedSettings::default();
+        assert!(!defaults.connection_scan.auto_scan_on_startup);
+
+        let mut settings = PersistedSettings::default();
+        settings.connection_scan.auto_scan_on_startup = true;
+        let serialized = settings.to_value();
+        assert_eq!(serialized["connectionScan"]["autoScanOnStartup"], true);
+
+        let mut value = serialized;
+        value.as_object_mut().unwrap().remove("connectionScan");
+        let restored: PersistedSettings = serde_json::from_value(value).unwrap();
+        // Settings files written before the scan key exists must not enable a
+        // network probe on startup.
+        assert!(!restored.connection_scan.auto_scan_on_startup);
     }
 
     #[test]

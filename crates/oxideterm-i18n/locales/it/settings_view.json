@@ -969,6 +969,8 @@
       "keys_and_connections_description": "Gestisci chiavi SSH, valori di connessione predefiniti, connessioni in background, riconnessione e importazioni.",
       "default_username": "Nome Utente Predefinito",
       "default_port": "Porta Predefinita",
+      "auto_scan_on_startup": "Cerca le connessioni salvate all'avvio",
+      "auto_scan_on_startup_hint": "Scansiona la rete locale all'avvio e aggiorna le connessioni salvate la cui impronta della chiave host SSH viene trovata a un nuovo indirizzo.",
       "groups": {
         "title": "Gruppi",
         "description": "Gestisci gruppi di connessione.",

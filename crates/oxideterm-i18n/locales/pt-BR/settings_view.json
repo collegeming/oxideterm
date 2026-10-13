@@ -969,6 +969,8 @@
       "keys_and_connections_description": "Gerencie chaves SSH, padrões de conexão, conexões em segundo plano, reconexão e importações.",
       "default_username": "Usuário padrão",
       "default_port": "Porta padrão",
+      "auto_scan_on_startup": "Procurar conexões salvas na inicialização",
+      "auto_scan_on_startup_hint": "Analisar a rede local na inicialização e atualizar as conexões salvas cuja impressão digital da chave de host SSH for encontrada em um novo endereço.",
       "groups": {
         "title": "Grupos",
         "description": "Gerenciar grupos de conexões.",

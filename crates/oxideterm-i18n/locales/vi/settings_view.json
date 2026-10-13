@@ -969,6 +969,8 @@
       "keys_and_connections_description": "Quản lý khóa SSH, mặc định kết nối, kết nối nền, kết nối lại và nhập cấu hình.",
       "default_username": "Tên người dùng mặc định",
       "default_port": "Cổng mặc định",
+      "auto_scan_on_startup": "Quét các kết nối đã lưu khi khởi động",
+      "auto_scan_on_startup_hint": "Quét mạng cục bộ khi khởi động và cập nhật các kết nối đã lưu khi dấu vân tay khóa máy chủ SSH được tìm thấy ở địa chỉ mới.",
       "groups": {
         "title": "Nhóm",
         "description": "Quản lý nhóm kết nối.",

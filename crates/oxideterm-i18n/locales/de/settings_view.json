@@ -969,6 +969,8 @@
       "keys_and_connections_description": "SSH-Schlüssel, Verbindungsvorgaben, Hintergrundverbindungen, Wiederverbindungen und Profilimporte verwalten.",
       "default_username": "Standard-Benutzername",
       "default_port": "Standard-Port",
+      "auto_scan_on_startup": "Gespeicherte Verbindungen beim Start suchen",
+      "auto_scan_on_startup_hint": "Beim Start das lokale Netzwerk durchsuchen und gespeicherte Verbindungen aktualisieren, deren SSH-Hostschlüssel-Fingerabdruck unter einer neuen Adresse gefunden wird.",
       "groups": {
         "title": "Gruppen",
         "description": "Verbindungsgruppen verwalten.",

@@ -462,6 +462,55 @@ impl NodeRuntimeStore {
         saved_connection_id: &str,
         x11_forwarding: Option<X11ForwardPolicy>,
     ) -> usize {
+        let mut updated = 0;
+        for node_id in self.saved_connection_endpoint_node_ids(saved_connection_id) {
+            let Some(mut route) = self.nodes.get_mut(&node_id) else {
+                continue;
+            };
+            if route.config.x11_forwarding == x11_forwarding {
+                continue;
+            }
+            route.config.x11_forwarding = x11_forwarding;
+            route.generation = route.generation.saturating_add(1);
+            updated += 1;
+        }
+        updated
+    }
+
+    /// Points materialized endpoints of a saved connection at a new address.
+    ///
+    /// A scan can prove that a saved connection's host key now answers on a
+    /// different address; runtime nodes created from that connection must follow
+    /// it or the next connect would reuse the stale one. Live transports keep
+    /// their own registry entry, so the new address applies from the next
+    /// connect instead of moving an established session.
+    pub fn retarget_saved_connection(
+        &self,
+        saved_connection_id: &str,
+        host: &str,
+        port: u16,
+    ) -> usize {
+        let mut updated = 0;
+        for node_id in self.saved_connection_endpoint_node_ids(saved_connection_id) {
+            let Some(mut route) = self.nodes.get_mut(&node_id) else {
+                continue;
+            };
+            if route.config.host == host && route.config.port == port {
+                continue;
+            }
+            route.config.host = host.to_string();
+            route.config.port = port;
+            route.generation = route.generation.saturating_add(1);
+            updated += 1;
+        }
+        updated
+    }
+
+    /// Node ids that materialize the endpoint of one saved connection.
+    ///
+    /// Manual preset hops carry the same saved connection id, but only a node
+    /// without an indexed successor is the saved endpoint itself.
+    fn saved_connection_endpoint_node_ids(&self, saved_connection_id: &str) -> Vec<NodeId> {
         let materialized_nodes = self
             .nodes
             .iter()
@@ -493,7 +542,7 @@ impl NodeRuntimeStore {
             .iter()
             .filter_map(|(node_id, hop_index, _)| hop_index.map(|index| (node_id.clone(), index)))
             .collect::<HashMap<_, _>>();
-        let target_node_ids = materialized_nodes
+        materialized_nodes
             .into_iter()
             .filter_map(|(node_id, hop_index, children_ids)| {
                 let is_target = hop_index.is_none_or(|index| {
@@ -506,21 +555,7 @@ impl NodeRuntimeStore {
                 });
                 is_target.then_some(node_id)
             })
-            .collect::<Vec<_>>();
-
-        let mut updated = 0;
-        for node_id in target_node_ids {
-            let Some(mut route) = self.nodes.get_mut(&node_id) else {
-                continue;
-            };
-            if route.config.x11_forwarding == x11_forwarding {
-                continue;
-            }
-            route.config.x11_forwarding = x11_forwarding;
-            route.generation = route.generation.saturating_add(1);
-            updated += 1;
-        }
-        updated
+            .collect()
     }
 
     /// Returns the non-secret projection used by UI and plugin readers.

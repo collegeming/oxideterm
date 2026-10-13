@@ -472,6 +472,7 @@ fn settings_search_specs() -> Vec<SettingsSearchEntrySpec> {
                 "settings_view.connections.ssh_config.auto_load",
                 "settings_view.connections.ssh_config.auto_sync",
                 "settings_view.connections.ssh_config.allow_proxy_command",
+                "settings_view.connections.auto_scan_on_startup",
             ],
         ),
         settings_search_entry(

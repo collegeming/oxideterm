@@ -1,0 +1,19 @@
+[lints]
+workspace = true
+
+[package]
+name = "oxideterm-discovery"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+if-addrs = "0.15.0"
+mdns-sd = "0.21.5"
+oxideterm-ssh = { path = "../oxideterm-ssh" }
+tokio.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+sha2.workspace = true
+tempfile = "3.23"

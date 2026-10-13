@@ -3584,4 +3584,271 @@ mod tests {
         assert_eq!(store.local_terminal_profiles()[0].id, "project");
     }
 
+    #[test]
+    fn host_key_identity_matches_only_its_connection_and_survives_reload() {
+        const FINGERPRINT: &str = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+        const PAYLOAD: &str = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+        let path = temp_store_path("host-key-identity-match");
+        let mut store = ConnectionStore::load(&path).unwrap();
+        store.upsert(request("conn-a", SavedAuth::Agent)).unwrap();
+        store.upsert(request("conn-b", SavedAuth::Agent)).unwrap();
+
+        assert!(store.connections_matching_host_key_fingerprint(FINGERPRINT).is_empty());
+        assert!(store.record_connection_host_key_fingerprint("conn-a", FINGERPRINT).unwrap());
+        // conn-b has its own key and must never answer for conn-a.
+        assert!(
+            store
+                .record_connection_host_key_fingerprint("conn-b", "SHA256:AAAABBBBCCCCDDDD")
+                .unwrap()
+        );
+
+        let matched = store.connections_matching_host_key_fingerprint(FINGERPRINT);
+        assert_eq!(
+            matched.iter().map(|connection| connection.id.as_str()).collect::<Vec<_>>(),
+            vec!["conn-a"]
+        );
+
+        // Reconnecting must not grow the identity, and a padded, differently
+        // cased spelling from another scanner names the same key.
+        assert!(store.record_connection_host_key_fingerprint("conn-a", FINGERPRINT).unwrap());
+        assert_eq!(
+            store.connection_host_key_fingerprints("conn-a").to_vec(),
+            vec![FINGERPRINT.to_string()]
+        );
+        let padded = store.connections_matching_host_key_fingerprint(&format!("  sha256:{PAYLOAD}= "));
+        assert_eq!(
+            padded.iter().map(|connection| connection.id.as_str()).collect::<Vec<_>>(),
+            vec!["conn-a"]
+        );
+
+        let reloaded = ConnectionStore::load(&path).unwrap();
+        assert_eq!(
+            reloaded.connection_host_key_fingerprints("conn-a").to_vec(),
+            vec![FINGERPRINT.to_string()]
+        );
+        assert_eq!(reloaded.connections_matching_host_key_fingerprint(FINGERPRINT)[0].id, "conn-a");
+    }
+
+    #[test]
+    fn host_key_identity_rejects_missing_connection_and_non_sha256_input() {
+        let path = temp_store_path("host-key-identity-rejects");
+        let mut store = ConnectionStore::load(&path).unwrap();
+        store.upsert(request("conn-a", SavedAuth::Agent)).unwrap();
+
+        assert!(!store.record_connection_host_key_fingerprint("missing", "SHA256:47DEQpj8HBSa").unwrap());
+        assert!(store.record_connection_host_key_fingerprint("conn-a", "MD5:aa:bb:cc").is_err());
+        assert!(store.record_connection_host_key_fingerprint("conn-a", "SHA256:").is_err());
+        assert!(store.record_connection_host_key_fingerprint("conn-a", "not-a-fingerprint").is_err());
+
+        assert!(store.connection_host_key_fingerprints("conn-a").is_empty());
+        assert!(store.connections_matching_host_key_fingerprint("MD5:aa:bb:cc").is_empty());
+        let reloaded = ConnectionStore::load(&path).unwrap();
+        assert!(reloaded.connection_host_key_fingerprints("conn-a").is_empty());
+    }
+
+    #[test]
+    fn scanned_endpoint_update_relocates_connection_and_keeps_its_identity() {
+        const FINGERPRINT: &str = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+        let path = temp_store_path("host-key-endpoint-update");
+        let mut store = ConnectionStore::load(&path).unwrap();
+        let mut original = request("conn-a", SavedAuth::Agent);
+        original.name = "Lab box".to_string();
+        original.username = "ops".to_string();
+        original.tags = vec!["lab".to_string()];
+        store.upsert(original).unwrap();
+        store.record_connection_host_key_fingerprint("conn-a", FINGERPRINT).unwrap();
+
+        assert!(store.update_connection_endpoint("conn-a", "10.0.0.5", 2222).unwrap());
+        let relocated = store.get("conn-a").unwrap();
+        assert_eq!(relocated.host, "10.0.0.5");
+        assert_eq!(relocated.port, 2222);
+        assert_eq!(relocated.name, "Lab box");
+        assert_eq!(relocated.username, "ops");
+        assert_eq!(relocated.tags, vec!["lab".to_string()]);
+        assert!(relocated.last_used_at.is_none());
+
+        // The relocated record is still the one this host key identifies.
+        let matched = store.connections_matching_host_key_fingerprint(FINGERPRINT);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].id, "conn-a");
+        assert_eq!(matched[0].host, "10.0.0.5");
+        assert_eq!(matched[0].port, 2222);
+
+        let reloaded = ConnectionStore::load(&path).unwrap();
+        assert_eq!(reloaded.get("conn-a").unwrap().host, "10.0.0.5");
+        assert_eq!(reloaded.get("conn-a").unwrap().port, 2222);
+    }
+
+    #[test]
+    fn endpoint_update_reports_unchanged_targets_without_dirtying_records() {
+        let mut store = load_empty_store("host-key-endpoint-noop");
+        store.upsert(request("conn-a", SavedAuth::Agent)).unwrap();
+        let original_updated_at = store.get("conn-a").unwrap().updated_at;
+
+        assert!(store.update_connection_endpoint("conn-a", "192.168.1.2", 22).unwrap());
+        assert_eq!(store.get("conn-a").unwrap().updated_at, original_updated_at);
+
+        assert!(!store.update_connection_endpoint("missing", "10.0.0.5", 2222).unwrap());
+        assert!(store.update_connection_endpoint("conn-a", "   ", 22).is_err());
+        assert_eq!(store.get("conn-a").unwrap().host, "192.168.1.2");
+        assert_eq!(store.get("conn-a").unwrap().port, 22);
+    }
+
+    #[test]
+    fn deleting_or_duplicating_a_connection_moves_its_host_key_identity() {
+        const FINGERPRINT: &str = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+        let path = temp_store_path("host-key-identity-lifecycle");
+        let mut store = ConnectionStore::load(&path).unwrap();
+        store.upsert(request("conn-a", SavedAuth::Agent)).unwrap();
+        store.record_connection_host_key_fingerprint("conn-a", FINGERPRINT).unwrap();
+
+        let duplicate = store.duplicate("conn-a").unwrap().unwrap();
+        assert_eq!(
+            store.connection_host_key_fingerprints(&duplicate.id).to_vec(),
+            vec![FINGERPRINT.to_string()]
+        );
+        let mut matched_ids = store
+            .connections_matching_host_key_fingerprint(FINGERPRINT)
+            .iter()
+            .map(|connection| connection.id.clone())
+            .collect::<Vec<_>>();
+        matched_ids.sort();
+        let mut expected_ids = vec!["conn-a".to_string(), duplicate.id.clone()];
+        expected_ids.sort();
+        assert_eq!(matched_ids, expected_ids);
+
+        assert!(store.delete("conn-a").unwrap());
+        assert!(store.connection_host_key_fingerprints("conn-a").is_empty());
+        let matched = store.connections_matching_host_key_fingerprint(FINGERPRINT);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].id, duplicate.id);
+
+        // A deletion must not leave the removed identity behind on disk.
+        let reloaded = ConnectionStore::load(&path).unwrap();
+        assert!(reloaded.connection_host_key_fingerprints("conn-a").is_empty());
+        assert_eq!(reloaded.connections_matching_host_key_fingerprint(FINGERPRINT).len(), 1);
+    }
+
+    #[test]
+    fn saved_connections_snapshot_apply_keeps_identities_for_untouched_and_updated_connections() {
+        const KEPT: &str = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+        const DELETED: &str = "SHA256:AAAABBBBCCCCDDDD";
+
+        // The incoming snapshot updates "conn-b" and carries a deletion for
+        // "conn-a"; a cloud-sync apply, CLI snapshot apply, and backup restore
+        // all land here.
+        let mut source = load_empty_store("host-key-snapshot-source");
+        source.upsert(request("conn-a", SavedAuth::Agent)).unwrap();
+        source.delete("conn-a").unwrap();
+        source.upsert(request("conn-b", SavedAuth::Agent)).unwrap();
+        let incoming = source.export_saved_connections_snapshot().unwrap();
+
+        let path = temp_store_path("host-key-snapshot-target");
+        let mut store = ConnectionStore::load(&path).unwrap();
+        store.upsert(request("conn-a", SavedAuth::Agent)).unwrap();
+        // This copy predates the incoming deletion, so the tombstone applies
+        // instead of being skipped as a stale conflict.
+        store
+            .data
+            .connections
+            .iter_mut()
+            .find(|connection| connection.id == "conn-a")
+            .expect("conn-a was just saved")
+            .updated_at = Some(Utc::now() - Duration::hours(1));
+        store.upsert(request("conn-b", SavedAuth::Agent)).unwrap();
+        store
+            .record_connection_host_key_fingerprint("conn-a", DELETED)
+            .unwrap();
+        store
+            .record_connection_host_key_fingerprint("conn-b", KEPT)
+            .unwrap();
+
+        store
+            .apply_saved_connections_snapshot(incoming, SavedConnectionsConflictStrategy::Replace)
+            .unwrap();
+
+        assert!(store.get("conn-a").is_none());
+        assert_eq!(
+            store.connection_host_key_fingerprints("conn-b").to_vec(),
+            vec![KEPT.to_string()]
+        );
+        assert!(store.connection_host_key_fingerprints("conn-a").is_empty());
+        // The scanned endpoint must stay resolvable through its identity.
+        let matched = store.connections_matching_host_key_fingerprint(KEPT);
+        assert_eq!(
+            matched
+                .iter()
+                .map(|connection| connection.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["conn-b"]
+        );
+
+        let reloaded = ConnectionStore::load(&path).unwrap();
+        assert_eq!(
+            reloaded.connection_host_key_fingerprints("conn-b").to_vec(),
+            vec![KEPT.to_string()]
+        );
+        assert!(
+            reloaded
+                .connection_host_key_fingerprints("conn-a")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn resolved_configuration_apply_keeps_identities_of_connections_present_in_the_snapshot() {
+        const KEPT: &str = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+        const DELETED: &str = "SHA256:AAAABBBBCCCCDDDD";
+
+        // Causal cloud sync rebuilds the whole connection list from the merged
+        // replica, so a connection missing from the resolved configuration is a
+        // deletion even without a tombstone record.
+        let mut source = load_empty_store("host-key-resolved-source");
+        source.upsert(request("conn-b", SavedAuth::Agent)).unwrap();
+        let incoming = source.export_saved_connections_snapshot().unwrap();
+
+        let path = temp_store_path("host-key-resolved-target");
+        let mut store = ConnectionStore::load(&path).unwrap();
+        store.upsert(request("conn-a", SavedAuth::Agent)).unwrap();
+        store.upsert(request("conn-b", SavedAuth::Agent)).unwrap();
+        store
+            .record_connection_host_key_fingerprint("conn-a", DELETED)
+            .unwrap();
+        store
+            .record_connection_host_key_fingerprint("conn-b", KEPT)
+            .unwrap();
+
+        let prepared = store
+            .prepare_resolved_configuration(ResolvedConnectionConfiguration {
+                connections: incoming,
+                serial: Vec::new(),
+                telnet: Vec::new(),
+                mosh: Vec::new(),
+                sftp: Vec::new(),
+                ftp: Vec::new(),
+                remote_desktop: Vec::new(),
+            })
+            .unwrap();
+        let _cleanup = store
+            .commit_prepared_saved_connections_snapshot(prepared)
+            .unwrap();
+
+        assert!(store.get("conn-a").is_none());
+        assert_eq!(
+            store.connection_host_key_fingerprints("conn-b").to_vec(),
+            vec![KEPT.to_string()]
+        );
+        assert!(store.connection_host_key_fingerprints("conn-a").is_empty());
+
+        let reloaded = ConnectionStore::load(&path).unwrap();
+        assert_eq!(
+            reloaded.connection_host_key_fingerprints("conn-b").to_vec(),
+            vec![KEPT.to_string()]
+        );
+        assert!(
+            reloaded
+                .connection_host_key_fingerprints("conn-a")
+                .is_empty()
+        );
+    }
 }

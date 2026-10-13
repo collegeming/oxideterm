@@ -23,6 +23,7 @@ mod acp_plugins;
 mod ide;
 mod ime;
 mod knowledge;
+mod lan_scan;
 mod local_sessions;
 mod local_shell_launcher;
 mod local_terminal_background;
@@ -98,6 +99,7 @@ use self::{
     ai_lazy::LazyAiRagStore,
     breadcrumb_scroll::scroll_breadcrumb_by_wheel,
     knowledge::KnowledgeWorkspaceLayout,
+    lan_scan::LanScanState,
     path_completion::{
         PathCompletionCandidate, PathCompletionOwner, PathCompletionState,
         local_path_completion_request, remote_path_completion_request,
@@ -965,6 +967,9 @@ pub(crate) struct WorkspaceApp {
     pending_window_ui_state: Option<oxideterm_settings::WindowUiState>,
     window_state_save_task: Option<Task<()>>,
     connection_store: ConnectionStore,
+    // A LAN scan reads the store's recorded host-key identities and writes moved
+    // endpoints back through it, so its state lives beside the store.
+    lan_scan: LanScanState,
     // The connection-layer worker owns SSH config parsing and persistence.
     ssh_config_sync_service: Option<SshConfigSyncService>,
     session_manager: Entity<SessionManagerState>,

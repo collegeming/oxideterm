@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -62,6 +62,22 @@ pub enum HostKeyVerification {
         actual_fingerprint: String,
         key_type: String,
     },
+}
+
+/// One host key recorded for an address, reduced to what matching needs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KnownHostKey {
+    pub key_type: String,
+    /// OpenSSH `SHA256:<base64>` fingerprint of the recorded key.
+    pub fingerprint: String,
+}
+
+/// Server host key captured by an address probe that never authenticates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostKeyProbe {
+    /// OpenSSH `SHA256:<base64>` fingerprint of the key the server presented.
+    pub fingerprint: String,
+    pub key_type: String,
 }
 
 pub fn public_key_fingerprint(key: &PublicKey) -> String {
@@ -267,6 +283,38 @@ impl KnownHostsStore {
             fingerprint,
             key_type: actual_key_type,
         }
+    }
+
+    /// Collects the keys recorded for one address in file order.
+    ///
+    /// Verification asks whether the presented key is trusted, while matching
+    /// asks which keys the user has ever recorded for this address. Those forms
+    /// are therefore read together: `host` and, when the port is not 22,
+    /// `[host]:port`, with duplicates merged.
+    fn recorded_keys(&self, host: &str, port: u16) -> Vec<KnownHostKey> {
+        let mut keys = Vec::new();
+        let mut seen = HashSet::new();
+        for lookup_key in [Self::make_key(host, port), Self::normalize_hostname(host)] {
+            let Some(entries) = self.hosts.get(&lookup_key) else {
+                continue;
+            };
+            for entry in entries {
+                // Unparsable data carries no comparable fingerprint. That includes
+                // the `@cert-authority` and `@revoked` marker lines this reader
+                // does not model, whose key type and data fields are shifted.
+                let Ok(public_key) = parse_public_key_base64(&entry.key_data) else {
+                    continue;
+                };
+                let fingerprint = public_key_fingerprint(&public_key);
+                if seen.insert((entry.key_type.clone(), fingerprint.clone())) {
+                    keys.push(KnownHostKey {
+                        key_type: entry.key_type.clone(),
+                        fingerprint,
+                    });
+                }
+            }
+        }
+        keys
     }
 
     fn add_host(
@@ -479,6 +527,15 @@ pub(crate) fn accept_host_key_for_session(host: &str, port: u16, fingerprint: St
     HOST_KEY_CACHE.set_verified(host, port, fingerprint);
 }
 
+/// Reads the host keys recorded in `known_hosts` for one address.
+///
+/// Address matching compares these fingerprints with freshly probed ones, so
+/// reading stays free of trust decisions and never touches the accepted-key
+/// cache.
+pub fn known_host_keys(host: &str, port: u16) -> Result<Vec<KnownHostKey>, SshTransportError> {
+    Ok(KnownHostsStore::new()?.recorded_keys(host, port))
+}
+
 pub fn learn_host_key(
     host: &str,
     port: u16,
@@ -600,6 +657,76 @@ fn preflight_client_config(
         inactivity_timeout: Some(Duration::from_secs(timeout_secs)),
         preferred: crate::preferred_algorithms(legacy_compatibility, algorithms)?,
         ..client::Config::default()
+    })
+}
+
+struct HostKeyProbeHandler {
+    probe: Arc<Mutex<Option<HostKeyProbe>>>,
+}
+
+impl client::Handler for HostKeyProbeHandler {
+    type Error = SshTransportError;
+
+    async fn check_server_key(
+        &mut self,
+        server_key: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        let PublicKeyOrCertificate::PublicKey {
+            key: server_public_key,
+            ..
+        } = server_key
+        else {
+            // A certificate's trust comes from CA policy, so its embedded key
+            // cannot be compared with fingerprints recorded for raw host keys.
+            return Err(SshTransportError::HostKeyCheckFailed(
+                "Server presented a host certificate instead of a raw host key".to_string(),
+            ));
+        };
+        *self.probe.lock().await = Some(HostKeyProbe {
+            fingerprint: public_key_fingerprint(server_public_key),
+            key_type: public_key_type(server_public_key),
+        });
+        Err(SshTransportError::PreflightComplete)
+    }
+}
+
+/// Reads the host key of one address without authenticating.
+///
+/// Address scanning needs the key a server presents right now, so this never
+/// consults or fills the accepted-key cache and never writes `known_hosts`;
+/// the caller decides what a match means. The probe negotiates with the default
+/// login policy so it observes the same key a connection would.
+pub async fn probe_host_key_fingerprint(
+    host: &str,
+    port: u16,
+    timeout_secs: u64,
+) -> Result<HostKeyProbe, SshTransportError> {
+    let stream = dial_initial_tcp(host, port, timeout_secs, None).await?;
+    let handler = HostKeyProbeHandler {
+        probe: Arc::new(Mutex::new(None)),
+    };
+    let probe = Arc::clone(&handler.probe);
+    let config = preflight_client_config(timeout_secs, false, &SshAlgorithmPreferences::default())
+        .map_err(|error| SshTransportError::ConnectionFailed(error.to_string()))?;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(timeout_secs),
+        client::connect_stream(Arc::new(config), stream, handler),
+    )
+    .await;
+
+    if let Some(probe) = probe.lock().await.take() {
+        return Ok(probe);
+    }
+
+    Err(match result {
+        Ok(Ok(_)) | Ok(Err(SshTransportError::PreflightComplete)) => {
+            SshTransportError::ConnectionFailed(
+                "SSH host key probe ended before the server key arrived".to_string(),
+            )
+        }
+        Ok(Err(error)) => error,
+        Err(_) => SshTransportError::Timeout,
     })
 }
 
@@ -896,5 +1023,162 @@ mod tests {
             )
         );
         let _ = fs::remove_file(path);
+    }
+
+    fn other_public_key() -> PublicKey {
+        parse_public_key_base64(
+            "AAAAC3NzaC1lZDI1NTE5AAAAID58mUC5YP+HOy7N0fL1xO4wmjmUGXXPbk+GR//eEkvY",
+        )
+        .unwrap()
+    }
+
+    fn expected_fingerprint(public_key: &PublicKey) -> String {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        format!(
+            "SHA256:{}",
+            base64::engine::general_purpose::STANDARD
+                .encode(Sha256::digest(public_key.public_key_bytes()))
+                .trim_end_matches('=')
+        )
+    }
+
+    struct ProbeServer;
+
+    impl russh::server::Handler for ProbeServer {
+        type Error = russh::Error;
+    }
+
+    fn closed_loopback_port() -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    #[test]
+    fn known_host_keys_reads_recorded_address_forms_without_other_hosts() {
+        let path = temp_known_hosts_path("read");
+        let host_key = sample_public_key();
+        let port_key = alternate_public_key();
+        let other_key = other_public_key();
+        fs::write(
+            &path,
+            format!(
+                "target.example.test,alias.example.test {host_type} {host_data}\n\
+                 [target.example.test]:2222 {port_type} {port_data}\n\
+                 [target.example.test]:2222 {host_type} {host_data}\n\
+                 other.example.test {other_type} {other_data}\n\
+                 |1|c2FsdA==|aGFzaGVk {host_type} {host_data}\n",
+                host_type = public_key_type(&host_key),
+                host_data = host_key.public_key_base64(),
+                port_type = public_key_type(&port_key),
+                port_data = port_key.public_key_base64(),
+                other_type = public_key_type(&other_key),
+                other_data = other_key.public_key_base64(),
+            ),
+        )
+        .unwrap();
+
+        let store = KnownHostsStore::with_path(path.clone()).unwrap();
+        let host_record = KnownHostKey {
+            key_type: public_key_type(&host_key),
+            fingerprint: public_key_fingerprint(&host_key),
+        };
+
+        assert_eq!(
+            store.recorded_keys("target.example.test", 22),
+            vec![host_record.clone()]
+        );
+        assert_eq!(
+            store.recorded_keys("alias.example.test", 22),
+            vec![host_record.clone()]
+        );
+        // A non-standard port reads both the `[host]:port` and the host-only
+        // records, and one key recorded in both forms stays one record.
+        assert_eq!(
+            store.recorded_keys("target.example.test", 2222),
+            vec![
+                KnownHostKey {
+                    key_type: public_key_type(&port_key),
+                    fingerprint: public_key_fingerprint(&port_key),
+                },
+                host_record,
+            ]
+        );
+        assert_eq!(
+            store.recorded_keys("other.example.test", 22),
+            vec![KnownHostKey {
+                key_type: public_key_type(&other_key),
+                fingerprint: public_key_fingerprint(&other_key),
+            }]
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn probe_reports_the_presented_key_without_touching_the_accepted_cache() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap();
+        HOST_KEY_CACHE.clear();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let private_key = russh::keys::PrivateKey::random(
+                &mut rand10::rng(),
+                russh::keys::Algorithm::Ed25519,
+            )
+            .unwrap();
+            let expected = expected_fingerprint(&private_key.public_key());
+            let server_task = tokio::spawn(async move {
+                let config = std::sync::Arc::new(russh::server::Config {
+                    keys: vec![private_key],
+                    ..russh::server::Config::default()
+                });
+                if let Ok((stream, _)) = listener.accept().await
+                    && let Ok(session) =
+                        russh::server::run_stream(config, stream, ProbeServer).await
+                {
+                    let _ = session.await;
+                }
+            });
+
+            // An already accepted key must not stand in for the key the address
+            // presents now, or a scan could report the wrong address.
+            accept_host_key_for_session("127.0.0.1", port, "SHA256:cached-decision".to_string());
+            let probe = probe_host_key_fingerprint("127.0.0.1", port, 5)
+                .await
+                .expect("a loopback probe must capture the server host key");
+
+            assert_eq!(probe.fingerprint, expected);
+            assert_eq!(probe.key_type, "ssh-ed25519");
+            // Scanning must not turn an address into a trusted one.
+            assert_eq!(
+                HOST_KEY_CACHE.get_verified("127.0.0.1", port).as_deref(),
+                Some("SHA256:cached-decision")
+            );
+            server_task.abort();
+            let _ = server_task.await;
+            HOST_KEY_CACHE.clear();
+        });
+    }
+
+    #[test]
+    fn probe_reports_a_closed_address_as_an_error() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let port = closed_loopback_port();
+            let error = probe_host_key_fingerprint("127.0.0.1", port, 1)
+                .await
+                .expect_err("a closed address must not produce a fingerprint");
+
+            assert!(
+                matches!(error, SshTransportError::ConnectionFailed(_)),
+                "unexpected probe error: {error}"
+            );
+        });
     }
 }

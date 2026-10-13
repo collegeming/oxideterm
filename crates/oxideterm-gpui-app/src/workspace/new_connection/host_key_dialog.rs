@@ -2,6 +2,7 @@ use gpui::{
     AnyElement, Context, MouseButton, ParentElement, SharedString, Styled, Window, div, prelude::*,
     px, rgb, rgba,
 };
+use oxideterm_connections::ConnectionStore;
 use oxideterm_gpui_ui::{
     MaterialRole,
     button::{ButtonOptions, ButtonRadius, ButtonSize, ButtonVariant, ToolbarButtonOptions},
@@ -32,6 +33,37 @@ pub(in crate::workspace) struct HostKeyChallenge {
     pub(in crate::workspace) port: u16,
 }
 
+/// Records the host-key identity of one saved connection after the user trusted
+/// its key in a way that persists the trust.
+///
+/// Only a saved connection may claim the key, and only at its own endpoint: a
+/// proxy hop's key belongs to the hop host, so recording it against the saved
+/// connection would later let a scan move that connection to the hop's address.
+fn record_trusted_saved_connection_host_key(
+    connection_store: &mut ConnectionStore,
+    persist: bool,
+    intent: &SshConnectionIntent,
+    host: &str,
+    port: u16,
+    fingerprint: &str,
+) {
+    if !persist {
+        return;
+    }
+    let SshConnectionIntent::ConnectSaved { id, .. } = intent else {
+        return;
+    };
+    let own_endpoint_was_trusted = connection_store
+        .get(id)
+        .is_some_and(|connection| connection.host == host && connection.port == port);
+    if !own_endpoint_was_trusted {
+        return;
+    }
+    // The connect must continue even when identity persistence fails, because
+    // the trust itself already lives in known_hosts.
+    let _ = connection_store.record_connection_host_key_fingerprint(id, fingerprint);
+}
+
 impl WorkspaceApp {
     fn accept_host_key_challenge(
         &mut self,
@@ -58,6 +90,17 @@ impl WorkspaceApp {
             }
             HostKeyStatus::Verified | HostKeyStatus::Error { .. } => return,
         };
+
+        // Both acceptance paths persist the trusted key in known_hosts, so the
+        // saved connection's identity is recorded once before either resumes.
+        record_trusted_saved_connection_host_key(
+            &mut self.connection_store,
+            persist,
+            &challenge.intent,
+            &challenge.host,
+            challenge.port,
+            &fingerprint,
+        );
 
         if challenge.session_tree_challenge {
             let message = self.i18n.t("ssh.form.checking_host_key");
@@ -520,5 +563,149 @@ impl WorkspaceApp {
             }),
         )
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use oxideterm_connections::{
+        ConnectionTerminalOptions, ConnectionX11ForwardingOptions,
+        DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS, SaveConnectionRequest, SavedAuth,
+        SavedUpstreamProxyPolicy, SshAlgorithmPreferences, SshChannelStrategy,
+    };
+
+    use super::*;
+
+    const FINGERPRINT: &str = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+
+    fn saved_connection_request(
+        id: &str,
+        name: &str,
+        host: &str,
+        port: u16,
+    ) -> SaveConnectionRequest {
+        SaveConnectionRequest {
+            totp_credential_id: None,
+            id: Some(id.to_string()),
+            name: name.to_string(),
+            group: None,
+            notes: None,
+            host: host.to_string(),
+            port,
+            username: "ops".to_string(),
+            auth: SavedAuth::Agent,
+            proxy_chain: Vec::new(),
+            upstream_proxy: SavedUpstreamProxyPolicy::UseGlobal,
+            proxy_command: None,
+            color: None,
+            icon_background_color: None,
+            icon: None,
+            tags: Vec::new(),
+            connect_timeout_seconds: DEFAULT_SSH_CONNECT_TIMEOUT_SECONDS,
+            agent_forwarding: false,
+            identity_agent: None,
+            agent_forwarding_socket: None,
+            legacy_ssh_compatibility: false,
+            ssh_algorithms: SshAlgorithmPreferences::default(),
+            dedicated_new_terminal_connection: false,
+            ssh_channel_strategy: SshChannelStrategy::default(),
+            x11_forwarding: ConnectionX11ForwardingOptions::default(),
+            post_connect_command: None,
+            terminal: ConnectionTerminalOptions::default(),
+        }
+    }
+
+    fn store_with_saved_connections() -> (tempfile::TempDir, ConnectionStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = ConnectionStore::load(directory.path().join("connections.json")).unwrap();
+        store
+            .upsert(saved_connection_request(
+                "saved-a",
+                "Alpha",
+                "alpha.test",
+                22,
+            ))
+            .unwrap();
+        store
+            .upsert(saved_connection_request(
+                "saved-b",
+                "Beta",
+                "beta.test",
+                2222,
+            ))
+            .unwrap();
+        (directory, store)
+    }
+
+    fn saved_a_intent() -> SshConnectionIntent {
+        SshConnectionIntent::ConnectSaved {
+            id: "saved-a".to_string(),
+            auth_save_target: None,
+        }
+    }
+
+    #[test]
+    fn trusted_saved_connection_key_is_recorded_for_its_own_endpoint() {
+        let (_directory, mut store) = store_with_saved_connections();
+
+        record_trusted_saved_connection_host_key(
+            &mut store,
+            true,
+            &saved_a_intent(),
+            "alpha.test",
+            22,
+            FINGERPRINT,
+        );
+
+        assert_eq!(
+            store.connection_host_key_fingerprints("saved-a").to_vec(),
+            vec![FINGERPRINT.to_string()]
+        );
+        // The accepted key belongs to saved-a alone; its neighbour keeps no claim on it.
+        assert!(store.connection_host_key_fingerprints("saved-b").is_empty());
+    }
+
+    #[test]
+    fn trusted_key_is_not_claimed_by_accept_once_hops_or_unsaved_connects() {
+        let (_directory, mut store) = store_with_saved_connections();
+
+        // "Trust once" accepts the key for this session without persisting it.
+        record_trusted_saved_connection_host_key(
+            &mut store,
+            false,
+            &saved_a_intent(),
+            "alpha.test",
+            22,
+            FINGERPRINT,
+        );
+        // A proxy hop's key identifies the hop host, not the connection reached through it.
+        record_trusted_saved_connection_host_key(
+            &mut store,
+            true,
+            &saved_a_intent(),
+            "jump.test",
+            22,
+            FINGERPRINT,
+        );
+        // A direct connect has no saved record to extend.
+        record_trusted_saved_connection_host_key(
+            &mut store,
+            true,
+            &SshConnectionIntent::Connect(Default::default()),
+            "alpha.test",
+            22,
+            FINGERPRINT,
+        );
+        // A port the saved record does not own is also a different endpoint.
+        record_trusted_saved_connection_host_key(
+            &mut store,
+            true,
+            &saved_a_intent(),
+            "alpha.test",
+            2222,
+            FINGERPRINT,
+        );
+
+        assert!(store.connection_host_key_fingerprints("saved-a").is_empty());
     }
 }

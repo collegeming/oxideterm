@@ -861,6 +861,7 @@ impl WorkspaceApp {
             pending_window_ui_state: None,
             window_state_save_task: None,
             connection_store,
+            lan_scan: LanScanState::default(),
             ssh_config_sync_service: None,
             session_manager,
             _session_manager_observation: session_manager_observation,
@@ -912,6 +913,7 @@ impl WorkspaceApp {
         workspace.sync_active_privilege_prompt_inline_hint(cx);
         workspace.refresh_terminal_trigger_runtime(cx);
         workspace.schedule_automatic_native_update_check(cx);
+        workspace.start_lan_auto_scan(cx);
         cx.on_release(|workspace, cx| {
             workspace.mosh_plugin_sessions.set_available(false);
             workspace.flush_main_window_state(cx);

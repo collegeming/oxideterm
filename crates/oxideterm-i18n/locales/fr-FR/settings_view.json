@@ -969,6 +969,8 @@
       "keys_and_connections_description": "Gérer les clés SSH, les valeurs de connexion par défaut, les connexions en arrière-plan, la reconnexion et les imports.",
       "default_username": "Nom d'utilisateur par défaut",
       "default_port": "Port par défaut",
+      "auto_scan_on_startup": "Rechercher les connexions enregistrées au démarrage",
+      "auto_scan_on_startup_hint": "Analyser le réseau local au démarrage et mettre à jour les connexions enregistrées dont l'empreinte de clé d'hôte SSH est retrouvée à une nouvelle adresse.",
       "groups": {
         "title": "Groupes",
         "description": "Gérer les groupes de connexions.",

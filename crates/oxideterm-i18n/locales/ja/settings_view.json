@@ -969,6 +969,8 @@
       "keys_and_connections_description": "SSH 鍵、接続の既定値、バックグラウンド接続、再接続、設定のインポートを管理します。",
       "default_username": "デフォルトユーザー名",
       "default_port": "デフォルトポート",
+      "auto_scan_on_startup": "起動時に保存済み接続をスキャン",
+      "auto_scan_on_startup_hint": "起動時にローカルネットワークをスキャンし、保存済み接続の SSH ホスト鍵フィンガープリントが新しいアドレスで見つかった場合にホストとポートを更新します。",
       "groups": {
         "title": "グループ",
         "description": "接続グループを管理します。",

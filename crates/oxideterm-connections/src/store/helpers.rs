@@ -120,6 +120,26 @@ fn non_empty<'a>(value: &'a str, label: &str) -> Result<&'a str> {
     Ok(value)
 }
 
+/// Canonicalizes a host-key fingerprint to the `SHA256:<base64>` spelling the
+/// SSH client reports, so a scan result and a stored identity compare equal.
+///
+/// Rejecting other algorithms here keeps the store from accumulating
+/// fingerprints that a SHA-256 scan can never match.
+fn normalize_host_key_fingerprint(fingerprint: &str) -> Result<String> {
+    let Some((algorithm, payload)) = fingerprint.trim().split_once(':') else {
+        bail!("Host key fingerprint must use the SHA256:<base64> form");
+    };
+    if !algorithm.eq_ignore_ascii_case("SHA256") {
+        bail!("Only SHA-256 host key fingerprints identify a saved connection");
+    }
+    // OpenSSH omits base64 padding; accept it on input and never store it.
+    let payload = payload.trim().trim_end_matches('=');
+    if payload.is_empty() {
+        bail!("Host key fingerprint carries no key material");
+    }
+    Ok(format!("SHA256:{payload}"))
+}
+
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value.and_then(|value| {
         let value = value.trim().to_string();

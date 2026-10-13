@@ -969,6 +969,8 @@
       "keys_and_connections_description": "管理 SSH 密钥、连接默认值、后台连接、自动重连和配置导入。",
       "default_username": "默认用户名",
       "default_port": "默认端口",
+      "auto_scan_on_startup": "启动时扫描已保存的连接",
+      "auto_scan_on_startup_hint": "启动时扫描局域网，当某个已保存连接的 SSH 主机密钥指纹出现在新地址时，更新该连接的主机和端口。",
       "groups": {
         "title": "分组",
         "description": "管理连接分组。",

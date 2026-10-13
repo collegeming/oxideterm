@@ -714,6 +714,83 @@ mod tests {
     }
 
     #[test]
+    fn retargeting_a_saved_connection_moves_only_its_own_endpoint() {
+        let store = NodeRuntimeStore::default();
+        let restored_target = NodeId::new("restored-target");
+        store.upsert_node_with_origin(
+            restored_target.clone(),
+            SshConfig::password("stale-host", 22, "me", "pw"),
+            NodeOrigin::Restored {
+                saved_connection_id: "saved-a".to_string(),
+            },
+        );
+        let preset_expansion = store
+            .expand_manual_preset(
+                "saved-a",
+                vec![SshConfig::password("jump-host", 22, "me", "pw")],
+                SshConfig::password("stale-host", 22, "me", "pw"),
+            )
+            .unwrap();
+        let other_saved_target = NodeId::new("other-saved-target");
+        let other_saved_config = SshConfig::password("stale-host", 22, "me", "pw");
+        store.upsert_node_with_origin(
+            other_saved_target.clone(),
+            other_saved_config.clone(),
+            NodeOrigin::Restored {
+                saved_connection_id: "saved-b".to_string(),
+            },
+        );
+        let direct_config = SshConfig::password("stale-host", 22, "me", "pw");
+        let direct_node = NodeId::new("direct-node");
+        store.upsert_node(direct_node.clone(), direct_config.clone());
+        let restored_generation = store.snapshot(&restored_target).unwrap().generation;
+        let preset_target_generation = store
+            .snapshot(&preset_expansion.target_node_id)
+            .unwrap()
+            .generation;
+
+        assert_eq!(
+            store.retarget_saved_connection("saved-a", "moved-host", 2222),
+            2
+        );
+
+        // The saved connection keeps every non-address field, including auth material.
+        let restored = store.snapshot(&restored_target).unwrap();
+        assert_eq!(
+            restored.config,
+            SshConfig::password("moved-host", 2222, "me", "pw")
+        );
+        assert_eq!(restored.generation, restored_generation + 1);
+        let preset_target = store.snapshot(&preset_expansion.target_node_id).unwrap();
+        assert_eq!(preset_target.config.host, "moved-host");
+        assert_eq!(preset_target.config.port, 2222);
+        assert_eq!(preset_target.generation, preset_target_generation + 1);
+        // Manual preset hops keep their own address, and nodes of other saved
+        // connections or ad-hoc nodes stay untouched even on the same host.
+        assert_eq!(
+            store
+                .snapshot(&preset_expansion.path_node_ids[0])
+                .unwrap()
+                .config,
+            SshConfig::password("jump-host", 22, "me", "pw")
+        );
+        assert_eq!(
+            store.snapshot(&other_saved_target).unwrap().config,
+            other_saved_config
+        );
+        assert_eq!(store.snapshot(&direct_node).unwrap().config, direct_config);
+
+        assert_eq!(
+            store.retarget_saved_connection("saved-a", "moved-host", 2222),
+            0
+        );
+        assert_eq!(
+            store.snapshot(&restored_target).unwrap().generation,
+            restored_generation + 1
+        );
+    }
+
+    #[test]
     fn expand_manual_preset_under_parent_requires_ready_parent() {
         let store = NodeRuntimeStore::default();
         let parent = NodeId::new("root");

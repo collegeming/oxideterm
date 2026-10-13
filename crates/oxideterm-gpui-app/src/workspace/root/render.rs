@@ -1368,6 +1368,9 @@ impl WorkspaceApp {
                     root.child(self.render_oxide_export_dialog(cx))
                 },
             )
+            // The LAN scan owns its dialog state outside the session manager that
+            // launches it, and returns an empty element while it is closed.
+            .child(self.render_lan_scan_dialog(cx))
             .when(self.command_palette.read(cx).is_open(), |root| {
                 root.child(self.render_command_palette(window, cx))
             })

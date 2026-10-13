@@ -632,6 +632,125 @@ impl ConnectionStore {
         audit_result
     }
 
+    /// Fingerprints recorded for one saved connection, in the order they were learned.
+    pub fn connection_host_key_fingerprints(&self, connection_id: &str) -> &[String] {
+        self.data
+            .connection_host_key_identities
+            .iter()
+            .find(|identity| identity.connection_id == connection_id)
+            .map(|identity| identity.fingerprints.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// Saved connections whose recorded host-key identity matches `fingerprint`.
+    ///
+    /// A LAN scan uses this to recognise a saved connection after its address
+    /// changed. The input is untrusted scan output, so anything that is not a
+    /// SHA-256 fingerprint matches nothing instead of failing the lookup.
+    pub fn connections_matching_host_key_fingerprint(
+        &self,
+        fingerprint: &str,
+    ) -> Vec<ConnectionInfo> {
+        let Ok(fingerprint) = normalize_host_key_fingerprint(fingerprint) else {
+            return Vec::new();
+        };
+        self.data
+            .connections
+            .iter()
+            .filter(|connection| {
+                self.connection_host_key_fingerprints(&connection.id)
+                    .contains(&fingerprint)
+            })
+            .map(ConnectionInfo::from)
+            .collect()
+    }
+
+    /// Records one observed host-key fingerprint for an existing saved connection.
+    ///
+    /// Returns `false` only when the connection is gone. Re-recording a known
+    /// fingerprint reports success without rewriting the store, so repeated
+    /// connects do not create revisions.
+    pub fn record_connection_host_key_fingerprint(
+        &mut self,
+        connection_id: &str,
+        fingerprint: &str,
+    ) -> Result<bool> {
+        let audit = oxideterm_audit::AuditOperation::begin(
+            oxideterm_audit::AuditCategory::Configuration,
+            "configuration_save",
+            Some(connection_id),
+            Some(fingerprint),
+        );
+        let audit_result = (|| {
+            let fingerprint = normalize_host_key_fingerprint(fingerprint)?;
+            if self.get(connection_id).is_none() {
+                return Ok(false);
+            }
+            if let Some(identity) = self
+                .data
+                .connection_host_key_identities
+                .iter_mut()
+                .find(|identity| identity.connection_id == connection_id)
+            {
+                if identity.fingerprints.contains(&fingerprint) {
+                    return Ok(true);
+                }
+                identity.fingerprints.push(fingerprint);
+            } else {
+                self.data
+                    .connection_host_key_identities
+                    .push(ConnectionHostKeyIdentity {
+                        connection_id: connection_id.to_string(),
+                        fingerprints: vec![fingerprint],
+                    });
+            }
+            self.normalize();
+            self.save()?;
+            Ok(true)
+        })();
+        audit.changed(&audit_result);
+        audit_result
+    }
+
+    /// Replaces the host and port of a saved connection after a scan matched its
+    /// recorded host-key identity.
+    ///
+    /// Only the endpoint moves: credentials, groups, tags, and recency stay
+    /// attached to the same record. Returns `false` only when the connection is
+    /// gone.
+    pub fn update_connection_endpoint(&mut self, id: &str, host: &str, port: u16) -> Result<bool> {
+        let audit = oxideterm_audit::AuditOperation::begin(
+            oxideterm_audit::AuditCategory::Configuration,
+            "configuration_save",
+            Some(id),
+            Some(host),
+        );
+        let audit_result = (|| {
+            let host = non_empty(host.trim(), "Host")?;
+            let port = port.max(1);
+            let Some(connection) = self
+                .data
+                .connections
+                .iter_mut()
+                .find(|connection| connection.id == id)
+            else {
+                return Ok(false);
+            };
+            if connection.host == host && connection.port == port {
+                // Re-offering the current address must not dirty the record or
+                // push a new revision into cloud sync.
+                return Ok(true);
+            }
+            connection.host = host.to_string();
+            connection.port = port;
+            connection.updated_at = Some(Utc::now());
+            self.save()?;
+            Ok(true)
+        })();
+        audit.changed(&audit_result);
+        audit_result
+    }
+
     pub fn ensure_group(&mut self, name: String) -> Result<()> {
         let name = validate_group_name(&name)?;
         if !self.data.groups.contains(&name) {
@@ -1034,6 +1153,17 @@ impl ConnectionStore {
         // safety choice.
         duplicate.privilege_credentials.clear();
         let duplicate_id = duplicate.id.clone();
+        // The copy initially targets the same endpoint, so it inherits the
+        // learned host-key identity instead of waiting for its own scan match.
+        let duplicate_fingerprints = self.connection_host_key_fingerprints(id).to_vec();
+        if !duplicate_fingerprints.is_empty() {
+            self.data
+                .connection_host_key_identities
+                .push(ConnectionHostKeyIdentity {
+                    connection_id: duplicate_id.clone(),
+                    fingerprints: duplicate_fingerprints,
+                });
+        }
         self.data.connections.push(duplicate);
         self.normalize();
         self.save()?;
@@ -4079,6 +4209,19 @@ impl ConnectionStore {
         self.data
             .connections
             .sort_by_key(|connection| connection.name.to_lowercase());
+        self.data
+            .connection_host_key_identities
+            .retain(|identity| {
+                !identity.fingerprints.is_empty()
+                    && self
+                        .data
+                        .connections
+                        .iter()
+                        .any(|connection| connection.id == identity.connection_id)
+            });
+        self.data
+            .connection_host_key_identities
+            .sort_by(|left, right| left.connection_id.cmp(&right.connection_id));
         self.data.local_terminal_profiles.sort_by_key(|profile| profile.name.to_lowercase());
         self.data
             .serial_profiles
@@ -4115,6 +4258,11 @@ impl ConnectionStore {
             .iter()
             .position(|connection| connection.id == id)?;
         self.data.recent.retain(|recent_id| recent_id != id);
+        // Every removal path lands here, so a deleted endpoint stops answering
+        // scans with an identity that no longer owns it.
+        self.data
+            .connection_host_key_identities
+            .retain(|identity| identity.connection_id != id);
         Some(self.data.connections.remove(position))
     }
 

@@ -1306,6 +1306,22 @@ impl WorkspaceApp {
             }),
             cx,
         ));
+        // The scan only relocates endpoints of saved connections, so the empty
+        // state keeps the discovery strip free of an action that cannot match.
+        let has_saved_connection = !self.connection_store.connection_infos().is_empty();
+        row = row.when(has_saved_connection, |row| {
+            row.child(self.render_tree_mode_action_button(
+                LucideIcon::Wifi,
+                self.i18n.t("sessionManager.lan_scan.action"),
+                has_background,
+                cx.listener(|this, _event, _window, cx| {
+                    this.close_session_row_menus(cx);
+                    this.start_lan_scan(None, cx);
+                    cx.stop_propagation();
+                }),
+                cx,
+            ))
+        });
         row.child(self.render_tree_mode_action_button(
             LucideIcon::FolderInput,
             self.i18n.t("settings_view.connections.ssh_config.title"),
@@ -1831,6 +1847,7 @@ impl WorkspaceApp {
             SessionManagerDisplayItem::Connection(connection) => {
                 let open_id = connection.id.clone();
                 let edit_id = connection.id.clone();
+                let scan_id = connection.id.clone();
                 let menu_id = connection.id.clone();
                 div()
                     .w(px(MANAGER_ROW_ACTIONS_WIDTH))
@@ -1859,6 +1876,18 @@ impl WorkspaceApp {
                         has_background,
                         move |this, _event, window, cx| {
                             this.open_saved_connection_editor(&edit_id, None, window, cx);
+                            cx.stop_propagation();
+                        },
+                        cx,
+                    ))
+                    .child(self.render_row_icon_button(
+                        LucideIcon::Wifi,
+                        MANAGER_ROW_ACTION_BUTTON,
+                        MANAGER_ROW_ACTION_ICON_SIZE,
+                        rgb(self.tokens.ui.text),
+                        has_background,
+                        move |this, _event, _window, cx| {
+                            this.start_lan_scan(Some(scan_id.clone()), cx);
                             cx.stop_propagation();
                         },
                         cx,
@@ -2370,6 +2399,25 @@ impl WorkspaceApp {
                 has_background,
                 move |this, _event, window, cx| {
                     this.test_connection(&test_id, window, cx);
+                    cx.stop_propagation();
+                },
+                cx,
+            ));
+
+            let scan_id = id.clone();
+            popup = popup.child(self.render_session_manager_menu_action(
+                dropdown_menu_item(
+                    &self.tokens,
+                    self.i18n.t("sessionManager.lan_scan.action"),
+                    DropdownMenuItemKind::Plain,
+                    false,
+                    false,
+                ),
+                false,
+                false,
+                has_background,
+                move |this, _event, _window, cx| {
+                    this.start_lan_scan(Some(scan_id.clone()), cx);
                     cx.stop_propagation();
                 },
                 cx,

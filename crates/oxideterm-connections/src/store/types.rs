@@ -1911,6 +1911,20 @@ impl fmt::Debug for SavedConnectionRuntimeSecrets {
     }
 }
 
+/// SSH host-key identity learned for one saved connection.
+///
+/// Kept beside the connection instead of inside `SavedConnection`: a host key is
+/// verified by this device against this device's known-hosts state, so it must
+/// not ride along in the portable connection records that cloud sync and
+/// `.oxide` transfers rebuild on another machine.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ConnectionHostKeyIdentity {
+    pub connection_id: String,
+    /// Canonical `SHA256:<base64>` fingerprints, in the order they were learned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fingerprints: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConnectionStoreData {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1919,6 +1933,8 @@ pub struct ConnectionStoreData {
     pub version: u32,
     #[serde(default)]
     pub connections: Vec<SavedConnection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connection_host_key_identities: Vec<ConnectionHostKeyIdentity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cleared_credentials: Vec<CredentialTarget>,
     #[serde(default)]
@@ -1967,6 +1983,7 @@ impl Default for ConnectionStoreData {
             totp_credentials: Vec::new(),
             version: CONFIG_VERSION,
             connections: Vec::new(),
+            connection_host_key_identities: Vec::new(),
             cleared_credentials: Vec::new(),
             global_proxy_credential_revision: String::new(),
             global_proxy_credential_cleared: false,

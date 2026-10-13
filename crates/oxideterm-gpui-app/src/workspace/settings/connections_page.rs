@@ -721,6 +721,30 @@ impl WorkspaceApp {
             .into_any_element()
     }
 
+    pub(in crate::workspace) fn auto_scan_on_startup_row(
+        &self,
+        settings: &PersistedSettings,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let enabled = settings.connection_scan.auto_scan_on_startup;
+        self.setting_row(
+            "settings_view.connections.auto_scan_on_startup",
+            "settings_view.connections.auto_scan_on_startup_hint",
+            checkbox(&self.tokens, String::new(), enabled)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.edit_settings(
+                            |settings| set_auto_scan_on_startup(settings, !enabled),
+                            cx,
+                        );
+                    }),
+                )
+                .into_any_element(),
+            cx,
+        )
+    }
+
     pub(in crate::workspace) fn connection_labeled_input(
         &self,
         label_key: &str,
@@ -776,13 +800,10 @@ impl WorkspaceApp {
         &self,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let auto_load_hosts = self.settings_store.settings().ssh_config.auto_load_hosts;
-        let auto_sync_hosts = self.settings_store.settings().ssh_config.auto_sync_hosts;
-        let allow_proxy_command = self
-            .settings_store
-            .settings()
-            .ssh_config
-            .allow_proxy_command;
+        let settings = self.settings_store.settings();
+        let auto_load_hosts = settings.ssh_config.auto_load_hosts;
+        let auto_sync_hosts = settings.ssh_config.auto_sync_hosts;
+        let allow_proxy_command = settings.ssh_config.allow_proxy_command;
         self.connection_section(
             "settings_view.connections.ssh_config.title",
             "",
@@ -854,6 +875,7 @@ impl WorkspaceApp {
                         .into_any_element(),
                     cx,
                 ),
+                self.auto_scan_on_startup_row(settings, cx),
                 div()
                     .flex()
                     .justify_start()

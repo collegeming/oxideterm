@@ -969,6 +969,8 @@
       "keys_and_connections_description": "Manage SSH keys, connection defaults, background connections, reconnection, and profile imports.",
       "default_username": "Default Username",
       "default_port": "Default Port",
+      "auto_scan_on_startup": "Scan for saved connections on startup",
+      "auto_scan_on_startup_hint": "Scan the local network on startup and update saved connections whose SSH host key fingerprint is found at a new address.",
       "groups": {
         "title": "Groups",
         "description": "Manage connection groups.",

@@ -969,6 +969,8 @@
       "keys_and_connections_description": "SSH 키, 연결 기본값, 백그라운드 연결, 재연결 및 설정 가져오기를 관리합니다.",
       "default_username": "기본 사용자명",
       "default_port": "기본 포트",
+      "auto_scan_on_startup": "시작 시 저장된 연결 스캔",
+      "auto_scan_on_startup_hint": "시작할 때 로컬 네트워크를 스캔하여 저장된 연결의 SSH 호스트 키 지문이 새 주소에서 발견되면 호스트와 포트를 업데이트합니다.",
       "groups": {
         "title": "그룹",
         "description": "연결 그룹 관리.",
