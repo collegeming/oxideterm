@@ -1,0 +1,315 @@
+# ---------------------------------------------------------------------------
+# build-installers — on-demand native installers for a fork or a local build.
+#
+# The upstream Native Package workflow publishes signed, release-pinned assets
+# and depends on repository secrets that a fork does not have. This workflow
+# reuses the same packaging scripts and does the one thing a fork owner needs:
+# produce unsigned installers on demand, keep them as downloadable workflow
+# artifacts, and let the run be downloaded and closed without any release.
+#
+# Manual dispatch only: a packaging matrix on every push would burn runner
+# minutes for no reader. Trigger it from the Actions tab, or from a terminal
+# with `gh workflow run build-installers.yml --repo <owner>/<repo>`.
+# ---------------------------------------------------------------------------
+name: Build Installers
+
+run-name: Installers ${{ inputs.targets || 'all' }} @ ${{ github.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Which installers to build'
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - linux-x64
+          - linux-arm64
+          - windows-x64
+          - windows-arm64
+          - macos-arm64
+          - macos-x64
+      retention_days:
+        description: 'Artifact retention in days (GitHub allows 1-90)'
+        required: false
+        default: '14'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-installers-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The packaging matrix needs a Docker daemon on Linux runners and ARM runner
+  # labels are not guaranteed on every plan, so resolve the requested set in one
+  # small job instead of relying on the matrix to skip work.
+  plan:
+    name: Plan targets
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.plan.outputs.include }}
+      retention: ${{ steps.plan.outputs.retention }}
+    steps:
+      - name: Resolve the requested platform set
+        id: plan
+        shell: bash
+        env:
+          REQUESTED: ${{ inputs.targets }}
+          RETENTION_DAYS: ${{ inputs.retention_days }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${REQUESTED}" || "${REQUESTED}" == "all" ]]; then
+            # Windows and macOS entries are free on the public runner images; the
+            # Linux entries decide whether the ARM runner label exists.
+            include=$(cat <<'JSON'
+          [
+            {"label": "linux-x64", "os": "ubuntu-22.04", "target": "x86_64-unknown-linux-gnu", "artifact": "installers-linux-x64"},
+            {"label": "linux-arm64", "os": "ubuntu-22.04-arm", "target": "aarch64-unknown-linux-gnu", "artifact": "installers-linux-arm64"},
+            {"label": "windows-x64", "os": "windows-latest", "target": "x86_64-pc-windows-msvc", "artifact": "installers-windows-x64"},
+            {"label": "windows-arm64", "os": "windows-latest", "target": "aarch64-pc-windows-msvc", "artifact": "installers-windows-arm64"},
+            {"label": "macos-arm64", "os": "macos-14", "target": "aarch64-apple-darwin", "artifact": "installers-macos-arm64"},
+            {"label": "macos-x64", "os": "macos-15-intel", "target": "x86_64-apple-darwin", "artifact": "installers-macos-x64"}
+          ]
+          JSON
+          )
+          else
+            case "${REQUESTED}" in
+              linux-x64)      os='ubuntu-22.04';     target='x86_64-unknown-linux-gnu' ;;
+              linux-arm64)    os='ubuntu-22.04-arm'; target='aarch64-unknown-linux-gnu' ;;
+              windows-x64)    os='windows-latest';   target='x86_64-pc-windows-msvc' ;;
+              windows-arm64)  os='windows-latest';   target='aarch64-pc-windows-msvc' ;;
+              macos-arm64)    os='macos-14';         target='aarch64-apple-darwin' ;;
+              macos-x64)      os='macos-15-intel';   target='x86_64-apple-darwin' ;;
+              *) echo "Unsupported target selection: ${REQUESTED}" >&2; exit 1 ;;
+            esac
+            include=$(printf '[{"label":"%s","os":"%s","target":"%s","artifact":"installers-%s"}]' \
+              "${REQUESTED}" "${os}" "${target}" "${REQUESTED}")
+          fi
+
+          if ! [[ "${RETENTION_DAYS}" =~ ^[0-9]+$ ]] || (( RETENTION_DAYS < 1 || RETENTION_DAYS > 90 )); then
+            echo "retention_days must be an integer between 1 and 90, got: ${RETENTION_DAYS}" >&2
+            exit 1
+          fi
+
+          # The matrix needs compact JSON on a single line.
+          echo "include=$(printf '%s' "${include}" | tr -d '\n ')" >> "${GITHUB_OUTPUT}"
+          echo "retention=${RETENTION_DAYS}" >> "${GITHUB_OUTPUT}"
+
+  package:
+    name: Package ${{ matrix.label }}
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.include) }}
+    env:
+      # A fork has no signing certificate. Ad-hoc macOS signing keeps the bundle
+      # launchable; leaving the certificate secrets empty makes the upstream
+      # import steps no-ops instead of failing on an unset secret.
+      MACOS_SIGN_CERTIFICATE_BASE64: ${{ secrets.MACOS_SIGN_CERTIFICATE_BASE64 }}
+      MACOS_SIGN_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_SIGN_CERTIFICATE_PASSWORD }}
+      WINDOWS_SIGN_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGN_CERTIFICATE_BASE64 }}
+      WINDOWS_SIGN_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGN_CERTIFICATE_PASSWORD }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Announce unsigned build
+        shell: bash
+        run: |
+          echo "Building an unsigned installer for ${{ matrix.target }}." >> "${GITHUB_STEP_SUMMARY}"
+          echo 'Windows and macOS will warn about an unknown publisher; this is expected for a self-built package.' >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Install Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.97.0
+          targets: ${{ matrix.target }}
+
+      - name: Rust cache
+        id: rust_cache
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: build-installers-${{ matrix.target }}
+          cache-on-failure: true
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/install-linux-deps
+        with:
+          extra_packages: 'curl file patchelf desktop-file-utils dpkg-dev rpm freerdp2-dev'
+
+      - name: Install Linux AppImage tooling
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu)
+              appimage_arch="x86_64"
+              appimage_sha256="b90f4a8b18967545fda78a445b27680a1642f1ef9488ced28b65398f2be7add2"
+              ;;
+            aarch64-unknown-linux-gnu)
+              appimage_arch="aarch64"
+              appimage_sha256="a48972e5ae91c944c5a7c80214e7e0a42dd6aa3ae979d8756203512a74ff574d"
+              ;;
+            *) echo "Unsupported AppImage target: ${{ matrix.target }}" >&2; exit 1 ;;
+          esac
+          curl -L --retry 3 \
+            -o appimagetool \
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-${appimage_arch}.AppImage"
+          echo "${appimage_sha256}  appimagetool" | sha256sum --check --strict
+          chmod +x appimagetool
+          sudo mv appimagetool /usr/local/bin/appimagetool
+
+      - name: Install Windows system dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          NSIS_VERSION: '3.12'
+          NSIS_ARCHIVE_SHA256: '56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f'
+        run: |
+          # Download the official portable archive without relying on Chocolatey's OData feed.
+          $archiveName = "nsis-$env:NSIS_VERSION.zip"
+          $archivePath = Join-Path $env:RUNNER_TEMP $archiveName
+          $downloadUrl = "https://downloads.sourceforge.net/project/nsis/NSIS%203/$env:NSIS_VERSION/$archiveName"
+          curl.exe --fail --location --retry 3 --retry-all-errors `
+            --output $archivePath $downloadUrl
+
+          $archiveHash = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash.ToLowerInvariant()
+          if ($archiveHash -ne $env:NSIS_ARCHIVE_SHA256) {
+            throw "NSIS archive checksum mismatch: $archiveHash"
+          }
+
+          $extractRoot = Join-Path $env:RUNNER_TEMP "nsis-$env:NSIS_VERSION-portable"
+          Expand-Archive -Path $archivePath -DestinationPath $extractRoot -Force
+          $nsisBin = Join-Path $extractRoot "nsis-$env:NSIS_VERSION"
+          if (-not (Test-Path (Join-Path $nsisBin 'makensis.exe'))) {
+            throw 'makensis.exe is missing from the verified NSIS archive.'
+          }
+          $nsisBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+            throw '7-Zip is missing from the GitHub-hosted Windows runner.'
+          }
+
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGN_CERTIFICATE_BASE64)) {
+            Write-Host 'Windows signing certificate is not configured; producing an unsigned artifact.'
+            exit 0
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'oxideterm-signing.pfx'
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:WINDOWS_SIGN_CERTIFICATE_BASE64)
+          )
+          $password = ConvertTo-SecureString $env:WINDOWS_SIGN_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate `
+            -FilePath $certificatePath `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -Password $password
+          Remove-Item $certificatePath -Force
+          "WINDOWS_SIGN_CERT_SHA1=$($certificate.Thumbprint)" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${MACOS_SIGN_CERTIFICATE_BASE64:-}" ]]; then
+            echo 'macOS signing certificate is not configured; the bundle is ad-hoc signed.'
+            exit 0
+          fi
+
+          keychain_path="${RUNNER_TEMP}/oxideterm-signing.keychain-db"
+          keychain_password="$(uuidgen)$(uuidgen)"
+          certificate_path="${RUNNER_TEMP}/oxideterm-signing.p12"
+          identity_path="${RUNNER_TEMP}/oxideterm-signing.pem"
+          printf '%s' "${MACOS_SIGN_CERTIFICATE_BASE64}" | openssl base64 -d -A > "${certificate_path}"
+          chmod 600 "${certificate_path}"
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          openssl pkcs12 \
+            -in "${certificate_path}" \
+            -passin env:MACOS_SIGN_CERTIFICATE_PASSWORD \
+            -nodes \
+            -out "${identity_path}"
+          chmod 600 "${identity_path}"
+          security import "${identity_path}" \
+            -k "${keychain_path}" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security list-keychains -d user -s "${keychain_path}"
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "${keychain_password}" \
+            "${keychain_path}"
+          signing_identity="$(security find-identity -v -p codesigning "${keychain_path}" | awk 'NR == 1 { print $2 }')"
+          if [[ -z "${signing_identity}" ]]; then
+            echo 'Imported macOS certificate did not expose a code-signing identity.' >&2
+            exit 1
+          fi
+          echo "MACOS_CODESIGN_IDENTITY=${signing_identity}" >> "${GITHUB_ENV}"
+          echo "MACOS_SIGNING_KEYCHAIN=${keychain_path}" >> "${GITHUB_ENV}"
+
+          rm -f "${certificate_path}" "${identity_path}"
+
+      - name: Package native app
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: ${{ runner.os == 'Linux' && '1' || '' }}
+        run: python scripts/release/package_native.py ${{ matrix.target }}
+
+      - name: Remove temporary signing material
+        if: always()
+        shell: bash
+        run: |
+          rm -f "${RUNNER_TEMP}"/AuthKey_*.p8
+          if [[ "${RUNNER_OS}" == 'macOS' && -n "${MACOS_SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "${MACOS_SIGNING_KEYCHAIN}" || true
+          fi
+
+      - name: Verify native package contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          python scripts/release/verify_native_package.py \
+            --target "${{ matrix.target }}" \
+            --version "${version}" \
+            --dist dist
+
+      - name: Upload installers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.artifact }}
+          retention-days: ${{ needs.plan.outputs.retention }}
+          path: |
+            dist/*.app.zip
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.exe
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+            dist/*.sha256
+          if-no-files-found: error
